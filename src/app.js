@@ -43,6 +43,8 @@ import createProxyMiddleware_ from './proxy/proxyMiddleware.js';
 
 import adminRoutes from './api/adminRoutes.js';
 
+import healthRoutes from './health/healthRoutes.js';
+
 /**
  * Create and configure the Express application.
  * @returns {import('express').Application}
@@ -85,9 +87,9 @@ export default function createApp() {
   // ─── 5. API Routes (handled by Express, NOT proxied) ────────────────────
   app.use('/api', statusRoutes);
   app.use('/api/admin', adminRoutes);
+  app.use('/api/health', healthRoutes);
 
   // Placeholder for future API routes (will be added in later milestones):
-  // app.use('/api', healthRoutes);      // M3: backend health data
   // app.use('/api', metricsRoutes);     // M4: routing metrics
   // app.use('/api', cacheRoutes);       // M5: cache stats
   // app.use('/api', securityRoutes);    // M6: security events

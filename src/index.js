@@ -26,6 +26,7 @@ import config from './config/index.js';
 import createApp from './app.js';
 import logger from './observability/logger.js';
 import backendPool from './config/backends.js';
+import healthMonitor from './health/healthMonitor.js';
 
 // ─── Create Application ──────────────────────────────────────────────────────
 const app = createApp();
@@ -49,12 +50,18 @@ server.listen(PORT, () => {
   logger.info(`   API:     http://localhost:${PORT}/api/status`);
   logger.info(`   Proxy:   http://localhost:${PORT}/`);
   logger.info('═══════════════════════════════════════════════════════════');
+
+  // Start health monitor
+  healthMonitor.start();
 });
 
 // ─── Graceful Shutdown ──────────────────────────────────────────────────────
 
 function gracefulShutdown(signal) {
   logger.info(`${signal} received — starting graceful shutdown...`);
+
+  // Stop background monitors immediately
+  healthMonitor.stop();
 
   server.close(() => {
     logger.info('HTTP server closed');
