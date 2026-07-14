@@ -1,0 +1,120 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# SentinelADC — Docker Compose Stack
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Architecture:
+#   gateway (SentinelADC) → backend-1, backend-2, backend-3
+#   gateway → redis (caching, rate limiting)
+#   gateway → mongo (analytics, security logs)
+#
+# Usage:
+#   docker-compose up --build        # Start all services
+#   docker-compose up -d             # Start in background
+#   docker-compose down              # Stop all services
+#   docker-compose logs -f gateway   # Follow gateway logs
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version: '3.8'
+
+services:
+  # ─── SentinelADC Gateway ──────────────────────────────────────────────────
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sentinel-gateway
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - NODE_ENV=development
+      - LOG_LEVEL=info
+      - BACKENDS=http://backend-1:4001,http://backend-2:4001,http://backend-3:4001
+      - LB_ALGORITHM=round-robin
+      - HEALTH_CHECK_INTERVAL=5000
+      - HEALTH_CHECK_PATH=/health
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MONGO_URI=mongodb://mongo:27017/sentinel-adc
+      - CORS_ORIGIN=http://localhost:5173
+    depends_on:
+      - backend-1
+      - backend-2
+      - backend-3
+      - redis
+      - mongo
+    networks:
+      - sentinel-network
+    restart: unless-stopped
+
+  # ─── Backend Servers (upstream targets) ────────────────────────────────────
+  backend-1:
+    build:
+      context: ./backends
+      dockerfile: Dockerfile
+    container_name: sentinel-backend-1
+    environment:
+      - PORT=4001
+      - SERVER_NAME=backend-1
+    networks:
+      - sentinel-network
+    restart: unless-stopped
+
+  backend-2:
+    build:
+      context: ./backends
+      dockerfile: Dockerfile
+    container_name: sentinel-backend-2
+    environment:
+      - PORT=4001
+      - SERVER_NAME=backend-2
+    networks:
+      - sentinel-network
+    restart: unless-stopped
+
+  backend-3:
+    build:
+      context: ./backends
+      dockerfile: Dockerfile
+    container_name: sentinel-backend-3
+    environment:
+      - PORT=4001
+      - SERVER_NAME=backend-3
+    networks:
+      - sentinel-network
+    restart: unless-stopped
+
+  # ─── Redis (Caching + Rate Limiting) ──────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: sentinel-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - sentinel-network
+    restart: unless-stopped
+
+  # ─── MongoDB (Analytics + Security Logs) ──────────────────────────────────
+  mongo:
+    image: mongo:7
+    container_name: sentinel-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - sentinel-network
+    restart: unless-stopped
+
+# ─── Volumes ─────────────────────────────────────────────────────────────────
+volumes:
+  redis-data:
+  mongo-data:
+
+# ─── Network ────────────────────────────────────────────────────────────────
+networks:
+  sentinel-network:
+    driver: bridge

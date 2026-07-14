@@ -1,0 +1,47 @@
+{
+  "name": "sentinel-adc",
+  "version": "1.0.0",
+  "description": "Cloud-Native Layer-7 Application Delivery Controller — Educational ADC inspired by F5 BIG-IP, NGINX, and Traefik",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "backend": "node backends/server.js",
+    "benchmark": "node benchmarks/run.js",
+    "docker:up": "docker-compose up --build",
+    "docker:down": "docker-compose down"
+  },
+  "keywords": [
+    "load-balancer",
+    "reverse-proxy",
+    "application-delivery-controller",
+    "layer-7",
+    "health-monitoring",
+    "rate-limiting",
+    "caching",
+    "observability"
+  ],
+  "author": "Gunavardhan Yakkati",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "helmet": "^8.0.0",
+    "http-proxy-middleware": "^3.0.3",
+    "ioredis": "^5.4.2",
+    "jsonwebtoken": "^9.0.2",
+    "mongodb": "^6.12.0",
+    "morgan": "^1.10.0",
+    "uuid": "^11.1.0",
+    "winston": "^3.17.0"
+  },
+  "devDependencies": {
+    "autocannon": "^8.0.0",
+    "nodemon": "^3.1.9"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
