@@ -35,3 +35,8 @@ benchmarks/results/
 
 # Coverage
 coverage/
+
+# Interview Preparation
+docs/INTERVIEW_GUIDE.md
+docs/pitch.md
+
