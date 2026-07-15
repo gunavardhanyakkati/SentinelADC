@@ -27,6 +27,9 @@ import createApp from './app.js';
 import logger from './observability/logger.js';
 import backendPool from './config/backends.js';
 import healthMonitor from './health/healthMonitor.js';
+import aggregationWorker from './analytics/aggregationWorker.js';
+import analyticsDb from './analytics/analyticsDb.js';
+import cacheService from './cache/cacheService.js';
 
 // ─── Create Application ──────────────────────────────────────────────────────
 const app = createApp();
@@ -53,6 +56,9 @@ server.listen(PORT, () => {
 
   // Start health monitor
   healthMonitor.start();
+
+  // Start background worker for analytics aggregates rollups
+  aggregationWorker.start();
 });
 
 // ─── Graceful Shutdown ──────────────────────────────────────────────────────
@@ -62,10 +68,15 @@ function gracefulShutdown(signal) {
 
   // Stop background monitors immediately
   healthMonitor.stop();
+  aggregationWorker.stop();
 
-  server.close(() => {
+  server.close(async () => {
     logger.info('HTTP server closed');
-    // Future: close Redis, MongoDB connections here
+    
+    // Gracefully close database client handles
+    await cacheService.close();
+    await analyticsDb.close();
+    
     process.exit(0);
   });
 

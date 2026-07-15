@@ -14,6 +14,7 @@
 import { Router } from 'express';
 import healthStore from './healthStore.js';
 import { HTTP_STATUS } from '../utils/constants.js';
+import jwtMiddleware from '../security/jwtMiddleware.js';
 
 const router = Router();
 
@@ -45,6 +46,9 @@ router.get('/:id', (req, res) => {
 
   res.json(healthData);
 });
+
+// Protect all health state mutation routes below this line
+router.use(jwtMiddleware());
 
 /**
  * POST /api/health/:id/override

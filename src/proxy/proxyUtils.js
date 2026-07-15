@@ -49,13 +49,15 @@ export function addProxyHeaders(proxyReq, req) {
   proxyReq.setHeader('X-Forwarded-Host', req.headers.host || '');
 
   // Pass through our request ID for distributed tracing
-  if (req.headers[SENTINEL_HEADERS.REQUEST_ID]) {
-    proxyReq.setHeader(SENTINEL_HEADERS.REQUEST_ID, req.headers[SENTINEL_HEADERS.REQUEST_ID]);
+  const requestId = req.requestId || req.headers[SENTINEL_HEADERS.REQUEST_ID];
+  if (requestId) {
+    proxyReq.setHeader(SENTINEL_HEADERS.REQUEST_ID, requestId);
   }
 
-  // Pass through correlation ID
-  if (req.headers[SENTINEL_HEADERS.CORRELATION_ID]) {
-    proxyReq.setHeader(SENTINEL_HEADERS.CORRELATION_ID, req.headers[SENTINEL_HEADERS.CORRELATION_ID]);
+  // Pass through correlation ID for end-to-end trace context propagation
+  const correlationId = req.correlationId || req.headers[SENTINEL_HEADERS.CORRELATION_ID];
+  if (correlationId) {
+    proxyReq.setHeader(SENTINEL_HEADERS.CORRELATION_ID, correlationId);
   }
 }
 

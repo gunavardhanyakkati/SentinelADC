@@ -280,6 +280,20 @@ class CacheService {
       averageBackendLatencyMs: averageBackendLatency,
     };
   }
+
+  /**
+   * Gracefully close the Redis connection.
+   */
+  async close() {
+    if (this.client) {
+      try {
+        await this.client.quit();
+        log.info('Closed Redis connection gracefully');
+      } catch (err) {
+        log.error(`Error closing Redis connection: ${err.message}`);
+      }
+    }
+  }
 }
 
 const cacheService = new CacheService();

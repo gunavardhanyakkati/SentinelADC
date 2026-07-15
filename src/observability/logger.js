@@ -28,23 +28,35 @@
 
 import winston from 'winston';
 import config from '../config/index.js';
+import { getCorrelationId } from './traceContext.js';
 
 const { combine, timestamp, json, printf, colorize, errors } = winston.format;
+
+// Custom format to inject active execution context correlation ID
+const correlationFormat = winston.format((info) => {
+  const cid = getCorrelationId();
+  if (cid) {
+    info.correlationId = cid;
+  }
+  return info;
+});
 
 // ─── Custom Formats ─────────────────────────────────────────────────────────
 
 /**
  * Human-readable format for development.
- * Example: 2024-01-15 12:30:45 [INFO] Server started on port 3000
+ * Example: 2026-07-15 12:30:45 [INFO] | trace:uuid — Server started
  */
 const devFormat = combine(
+  correlationFormat(),
   colorize({ all: true }),
   timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
   errors({ stack: true }),
-  printf(({ timestamp, level, message, stack, ...meta }) => {
+  printf(({ timestamp, level, message, stack, correlationId, ...meta }) => {
+    const traceStr = correlationId ? ` | trace:${correlationId}` : '';
     const metaStr = Object.keys(meta).length ? ` ${JSON.stringify(meta)}` : '';
     const stackStr = stack ? `\n${stack}` : '';
-    return `${timestamp} [${level}] ${message}${metaStr}${stackStr}`;
+    return `${timestamp} [${level}]${traceStr} — ${message}${metaStr}${stackStr}`;
   }),
 );
 
@@ -53,6 +65,7 @@ const devFormat = combine(
  * Each log line is a valid JSON object.
  */
 const prodFormat = combine(
+  correlationFormat(),
   timestamp({ format: 'YYYY-MM-DDTHH:mm:ss.SSSZ' }),
   errors({ stack: true }),
   json(),

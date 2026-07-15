@@ -40,15 +40,23 @@ import errorHandler from './middleware/errorHandler.js';
 import statusRoutes from './api/statusRoutes.js';
 import routingEngine from './routing/routingEngine.js';
 import createProxyMiddleware_ from './proxy/proxyMiddleware.js';
+import correlationIdMiddleware from './middleware/correlationId.js';
 
 import adminRoutes from './api/adminRoutes.js';
-
 import healthRoutes from './health/healthRoutes.js';
-
 import metricsRoutes from './metrics/metricsRoutes.js';
-
 import cacheRoutes from './cache/cacheRoutes.js';
 import cacheMiddleware from './cache/cacheMiddleware.js';
+
+import ipBlocklist from './security/ipBlocklist.js';
+import headerValidator from './security/headerValidator.js';
+import rateLimiter from './security/rateLimiter.js';
+import wafMiddleware from './security/wafMiddleware.js';
+import jwtMiddleware from './security/jwtMiddleware.js';
+import securityRoutes from './security/securityRoutes.js';
+
+import analyticsCollector from './analytics/analyticsCollector.js';
+import analyticsRoutes from './analytics/analyticsRoutes.js';
 
 /**
  * Create and configure the Express application.
@@ -60,10 +68,20 @@ export default function createApp() {
   // ─── 1. Response Timer (must be first) ──────────────────────────────────
   app.use(responseTimer());
 
-  // ─── 2. Request Logger ──────────────────────────────────────────────────
+  // ─── 2. Correlation Tracing Context (AsyncLocalStorage wrapper) ─────────
+  app.use(correlationIdMiddleware());
+
+  // ─── 3. Analytics Telemetry Collector ───────────────────────────────────
+  app.use(analyticsCollector());
+
+  // ─── 3. Firewall Filter (IP blocklist & basic header checks) ────────────
+  app.use(ipBlocklist.middleware());
+  app.use(headerValidator());
+
+  // ─── 4. Request Logger ──────────────────────────────────────────────────
   app.use(requestLogger());
 
-  // ─── 3. Security Headers ────────────────────────────────────────────────
+  // ─── 4. Security Headers ────────────────────────────────────────────────
   app.use(helmet({
     // Disable CSP for API gateway (backends control their own CSP)
     contentSecurityPolicy: false,
@@ -84,27 +102,33 @@ export default function createApp() {
     credentials: true,
   }));
 
-  // ─── 4. Body Parsing (API routes only) ──────────────────────────────────
+  // ─── 5. Rate Limiter (protect against DOS/brute-force) ──────────────────
+  app.use(rateLimiter.middleware());
+
+  // ─── 6. Body Parsing (API routes only) ──────────────────────────────────
   // We only parse JSON for our /api routes. Proxied requests pass through raw.
   app.use('/api', express.json({ limit: '10mb' }));
   app.use('/api', express.urlencoded({ extended: true }));
 
-  // ─── 5. API Routes (handled by Express, NOT proxied) ────────────────────
+  // ─── 7. Web Application Firewall (inspects query, path, and parsed body) ─
+  app.use(wafMiddleware());
+
+  // ─── 8. API Routes (handled by Express, NOT proxied) ────────────────────
   app.use('/api', statusRoutes);
-  app.use('/api/admin', adminRoutes);
+  app.use('/api/admin', jwtMiddleware(), adminRoutes); // Protect all administration endpoints
   app.use('/api/health', healthRoutes);
   app.use('/api/metrics', metricsRoutes);
   app.use('/api/cache', cacheRoutes);
+  app.use('/api/security', securityRoutes);
+  app.use('/api/analytics', jwtMiddleware(), analyticsRoutes);
 
   // Placeholder for future API routes (will be added in later milestones):
-  // app.use('/api', securityRoutes);    // M6: security events
-  // app.use('/api', analyticsRoutes);   // M7: analytics data
-  // app.use('/api', observabilityRoutes); // M8: logs & traces
+  // app.use('/api/observability', observabilityRoutes); // M8: logs & traces
 
-  // ─── 6. Cache Middleware (GET requests only) ────────────────────────────
+  // ─── 9. Cache Middleware (GET requests only) ────────────────────────────
   app.use(cacheMiddleware());
 
-  // ─── 7. Reverse Proxy (everything not /api goes to backends) ────────────
+  // ─── 10. Reverse Proxy (everything not /api goes to backends) ───────────
   const proxyMiddleware = createProxyMiddleware_(routingEngine);
 
   // Only proxy non-API requests
@@ -116,7 +140,7 @@ export default function createApp() {
     return proxyMiddleware(req, res, next);
   });
 
-  // ─── 7. Centralized Error Handler ──────────────────────────────────────
+  // ─── 11. Centralized Error Handler ──────────────────────────────────────
   app.use(errorHandler);
 
   return app;

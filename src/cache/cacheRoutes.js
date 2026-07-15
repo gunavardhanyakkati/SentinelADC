@@ -9,6 +9,7 @@
 import { Router } from 'express';
 import cacheService from './cacheService.js';
 import { HTTP_STATUS } from '../utils/constants.js';
+import jwtMiddleware from '../security/jwtMiddleware.js';
 
 const router = Router();
 
@@ -22,6 +23,9 @@ router.get('/stats', (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+// Protect all cache writing/deleting routes below this line
+router.use(jwtMiddleware());
 
 /**
  * DELETE /api/cache
