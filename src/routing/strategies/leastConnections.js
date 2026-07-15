@@ -18,6 +18,8 @@
  * - What are the disadvantages? (Needs state tracking, slightly more CPU cycles than RR)
  */
 
+import metricsStore from '../../metrics/metricsStore.js';
+
 export default class LeastConnectionsStrategy {
   /**
    * Select a backend from the list of healthy backends.
@@ -40,11 +42,20 @@ export default class LeastConnectionsStrategy {
       }
     }
 
-    // If multiple backends are tied, pick one (e.g. random or first)
-    // First is simple and predictable for educational demos
-    const selected = selectedBackends[0];
+    // If multiple backends are tied, break the tie using the backend score
+    let selected = selectedBackends[0];
+    let bestScore = -1;
+
+    for (const backend of selectedBackends) {
+      const metrics = metricsStore.getBackendMetrics(backend.id);
+      const score = metrics ? metrics.score : 100;
+      if (score > bestScore) {
+        bestScore = score;
+        selected = backend;
+      }
+    }
     
-    req._lbReason = `least-connections (active connections: ${minConnections})`;
+    req._lbReason = `least-connections (connections: ${minConnections}, tie-breaker score: ${bestScore})`;
     return selected;
   }
 }

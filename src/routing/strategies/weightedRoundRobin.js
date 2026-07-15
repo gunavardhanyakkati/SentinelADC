@@ -8,16 +8,18 @@
  *
  * DESIGN DECISIONS:
  * - Uses the classic LVS (Linux Virtual Server) algorithm.
+ * - Dynamically maps configured static weights to virtual weights scaled by the
+ *   backend's real-time performance score (F5 "Dynamic Ratio").
  * - Maintains dynamic internal state (`currentIndex` and `currentWeight`).
- * - Dynamically computes the Greatest Common Divisor (GCD) and Maximum Weight
- *   to handle runtime weight changes.
  *
  * INTERVIEW QUESTIONS:
  * - How does the LVS WRR algorithm work under the hood?
- * - What happens if a server's weight is set to 0? (It gets no traffic)
- * - How does this algorithm compare to a simple "weighted list expansion"?
- *   (List expansion takes O(Sum(Weights)) memory, while LVS is O(1) memory and O(N) selection time)
+ * - What is "Dynamic Ratio" load balancing? (Real-time performance scores scale
+ *   configured server weights dynamically)
+ * - How do you prevent division by zero or negative weights? (Cap weights to minimum 1)
  */
+
+import metricsStore from '../../metrics/metricsStore.js';
 
 export default class WeightedRoundRobinStrategy {
   constructor() {
@@ -66,15 +68,30 @@ export default class WeightedRoundRobinStrategy {
    * @returns {import('../../config/backends.js').Backend}
    */
   select(backends, req) {
-    const n = backends.length;
-    const maxWeight = this.getMaxWeight(backends);
-    const gcdWeight = this.getGcdOfWeights(backends);
+    // Map backends to temporary virtual pool members with dynamically adjusted weights based on metrics score
+    const virtualPool = backends.map((backend) => {
+      const metrics = metricsStore.getBackendMetrics(backend.id);
+      const score = metrics ? metrics.score : 100;
+      
+      // Calculate dynamic weight: configured weight multiplied by score percentage
+      const dynamicWeight = Math.max(1, Math.round((backend.weight || 1) * (score / 100)));
+      return {
+        backend,
+        weight: dynamicWeight,
+        id: backend.id,
+      };
+    });
+
+    const n = virtualPool.length;
+    const maxWeight = this.getMaxWeight(virtualPool);
+    const gcdWeight = this.getGcdOfWeights(virtualPool);
 
     // If all weights are 0, fallback to standard Round Robin index
     if (maxWeight === 0) {
       this.currentIndex = (this.currentIndex + 1) % n;
-      req._lbReason = 'weighted-round-robin (fallback to RR, all weights 0)';
-      return backends[this.currentIndex];
+      const selected = virtualPool[this.currentIndex].backend;
+      req._lbReason = 'weighted-round-robin (dynamic fallback to RR)';
+      return selected;
     }
 
     while (true) {
@@ -86,10 +103,10 @@ export default class WeightedRoundRobinStrategy {
         }
       }
 
-      const backend = backends[this.currentIndex];
-      if (backend.weight >= this.currentWeight) {
-        req._lbReason = `weighted-round-robin (backend weight: ${backend.weight}, selection weight: ${this.currentWeight})`;
-        return backend;
+      const virtualMember = virtualPool[this.currentIndex];
+      if (virtualMember.weight >= this.currentWeight) {
+        req._lbReason = `weighted-round-robin (dynamic weight: ${virtualMember.weight}/${virtualMember.backend.weight}, selection: ${this.currentWeight})`;
+        return virtualMember.backend;
       }
     }
   }

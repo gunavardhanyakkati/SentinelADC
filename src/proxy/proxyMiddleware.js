@@ -43,6 +43,7 @@ import { createProxyMiddleware } from 'http-proxy-middleware';
 import { createChildLogger } from '../observability/logger.js';
 import { addProxyHeaders, addResponseHeaders } from './proxyUtils.js';
 import { TIMEOUTS } from '../utils/constants.js';
+import { collectProxyResponse, collectProxyError } from '../metrics/metricsCollector.js';
 
 const log = createChildLogger({ module: 'proxy' });
 
@@ -121,6 +122,7 @@ export default function createProxyMiddleware_(routingEngine) {
        */
       proxyRes: (proxyRes, req, res) => {
         addResponseHeaders(proxyRes, req, res);
+        collectProxyResponse(req, proxyRes);
 
         log.debug('Proxy response received', {
           status: proxyRes.statusCode,
@@ -134,6 +136,8 @@ export default function createProxyMiddleware_(routingEngine) {
        * Return a proper 502 Bad Gateway response.
        */
       error: (err, req, res) => {
+        collectProxyError(req, err);
+
         log.error('Proxy error', {
           error: err.message,
           code: err.code,

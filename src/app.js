@@ -45,6 +45,11 @@ import adminRoutes from './api/adminRoutes.js';
 
 import healthRoutes from './health/healthRoutes.js';
 
+import metricsRoutes from './metrics/metricsRoutes.js';
+
+import cacheRoutes from './cache/cacheRoutes.js';
+import cacheMiddleware from './cache/cacheMiddleware.js';
+
 /**
  * Create and configure the Express application.
  * @returns {import('express').Application}
@@ -88,15 +93,18 @@ export default function createApp() {
   app.use('/api', statusRoutes);
   app.use('/api/admin', adminRoutes);
   app.use('/api/health', healthRoutes);
+  app.use('/api/metrics', metricsRoutes);
+  app.use('/api/cache', cacheRoutes);
 
   // Placeholder for future API routes (will be added in later milestones):
-  // app.use('/api', metricsRoutes);     // M4: routing metrics
-  // app.use('/api', cacheRoutes);       // M5: cache stats
   // app.use('/api', securityRoutes);    // M6: security events
   // app.use('/api', analyticsRoutes);   // M7: analytics data
   // app.use('/api', observabilityRoutes); // M8: logs & traces
 
-  // ─── 6. Reverse Proxy (everything not /api goes to backends) ────────────
+  // ─── 6. Cache Middleware (GET requests only) ────────────────────────────
+  app.use(cacheMiddleware());
+
+  // ─── 7. Reverse Proxy (everything not /api goes to backends) ────────────
   const proxyMiddleware = createProxyMiddleware_(routingEngine);
 
   // Only proxy non-API requests
