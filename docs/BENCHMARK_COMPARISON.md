@@ -6,7 +6,7 @@ This document provides a quantitative benchmark comparison and architectural dee
 
 ## 1. Quantitative Performance Comparison Table
 
-| Metric / Capability | SentinelADC (Node.js v22) | NGINX (v1.25 Alpine) | Architecture Rationale & Trade-offs |
+| Metric / Capability | SentinelADC (Node.js v22.19.0) | NGINX (v1.25 Alpine) | Architecture Rationale & Trade-offs |
 |---|---|---|---|
 | **Raw Passthrough Throughput (RPS)** | **753 req/sec** | **~6,500 – 8,200 req/sec** | NGINX operates native C compiled loops with epoll eventing; SentinelADC runs V8 JS event loop. |
 | **p50 Median Latency** | **128.00 ms** | **12.10 ms** | NGINX uses zero-copy memory buffers and non-allocating socket pools. |
