@@ -22,6 +22,7 @@
 import { Router } from 'express';
 import routingEngine from '../routing/routingEngine.js';
 import strategyFactory from '../routing/strategyFactory.js';
+import connectionDrainManager from '../admin/connectionDrainManager.js';
 import { HTTP_STATUS } from '../utils/constants.js';
 
 const router = Router();
@@ -101,6 +102,41 @@ router.put('/backends/:id/weight', (req, res) => {
     message: `Successfully updated weight of ${id} to ${weight}`,
     backend,
   });
+});
+
+/**
+ * POST /api/admin/backends/:id/drain
+ * Initiate connection draining (maintenance mode) for a backend.
+ */
+router.post('/backends/:id/drain', (req, res) => {
+  const { id } = req.params;
+  const timeoutSec = parseInt(req.body.timeoutSec || req.query.timeoutSec, 10) || 30;
+
+  try {
+    const result = connectionDrainManager.drainBackend(id, timeoutSec);
+    res.json(result);
+  } catch (error) {
+    res.status(HTTP_STATUS.NOT_FOUND).json({
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * POST /api/admin/backends/:id/undrain
+ * Cancel connection drain and restore backend to HEALTHY status.
+ */
+router.post('/backends/:id/undrain', (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const result = connectionDrainManager.undrainBackend(id);
+    res.json(result);
+  } catch (error) {
+    res.status(HTTP_STATUS.NOT_FOUND).json({
+      error: error.message,
+    });
+  }
 });
 
 export default router;

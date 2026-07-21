@@ -114,4 +114,58 @@ router.delete('/blocklist/:ip', (req, res) => {
   });
 });
 
+/**
+ * GET /api/security/anomalies
+ * Fetch statistical traffic anomalies, baselines, and configuration.
+ */
+router.get('/anomalies', (req, res) => {
+  res.json({
+    config: {
+      enabled: anomalyDetector.enabled,
+      zThreshold: anomalyDetector.zThreshold,
+      autoEnforce: anomalyDetector.autoEnforce,
+      penaltyMaxRequests: anomalyDetector.penaltyMaxRequests,
+      penaltyWindowMs: anomalyDetector.penaltyWindowMs,
+    },
+    anomalies: anomalyDetector.getAnomalies(),
+    baselines: anomalyDetector.getBaselines(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+/**
+ * POST /api/security/anomalies/config
+ * Dynamic configuration update for anomaly detection & auto-enforcement.
+ */
+router.post('/anomalies/config', (req, res) => {
+  const { autoEnforce, zThreshold } = req.body;
+
+  if (typeof autoEnforce === 'boolean') {
+    anomalyDetector.setAutoEnforce(autoEnforce);
+  }
+  if (typeof zThreshold === 'number') {
+    anomalyDetector.setZThreshold(zThreshold);
+  }
+
+  res.json({
+    message: 'Anomaly detection configuration updated successfully',
+    config: {
+      enabled: anomalyDetector.enabled,
+      zThreshold: anomalyDetector.zThreshold,
+      autoEnforce: anomalyDetector.autoEnforce,
+    },
+  });
+});
+
+/**
+ * DELETE /api/security/anomalies
+ * Clear logged anomaly events and IP baselines.
+ */
+router.delete('/anomalies', (req, res) => {
+  anomalyDetector.clearAnomalies();
+  res.json({
+    message: 'Anomaly detection records and baselines cleared successfully',
+  });
+});
+
 export default router;

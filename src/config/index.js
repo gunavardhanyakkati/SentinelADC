@@ -52,6 +52,15 @@ const config = {
     get isProd() { return this.env === 'production'; },
   },
 
+  // ─── TLS / HTTPS ────────────────────────────────────────────────────────
+  tls: {
+    enabled: process.env.TLS_ENABLED === 'true',
+    port: parseInt(process.env.TLS_PORT, 10) || 8443,
+    keyPath: process.env.TLS_KEY_PATH || './certs/server.key',
+    certPath: process.env.TLS_CERT_PATH || './certs/server.crt',
+    redirect: process.env.TLS_REDIRECT === 'true',
+  },
+
   // ─── Logging ────────────────────────────────────────────────────────────
   logging: {
     level: process.env.LOG_LEVEL || 'info',
@@ -104,6 +113,19 @@ const config = {
     rateLimit: {
       windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 60000,
       maxRequests: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS, 10) || 100,
+    },
+    anomaly: {
+      enabled: process.env.ANOMALY_DETECTION_ENABLED !== 'false',
+      zThreshold: parseFloat(process.env.ANOMALY_Z_THRESHOLD) || 3.0,
+      autoEnforce: process.env.ANOMALY_AUTO_ENFORCE === 'true',
+      penaltyMaxRequests: parseInt(process.env.ANOMALY_PENALTY_MAX_REQUESTS, 10) || 10,
+      penaltyWindowMs: parseInt(process.env.ANOMALY_PENALTY_WINDOW_MS, 10) || 300000,
+    },
+    circuitBreaker: {
+      enabled: process.env.CIRCUIT_BREAKER_ENABLED !== 'false',
+      failureThreshold: parseInt(process.env.CIRCUIT_BREAKER_FAILURE_THRESHOLD, 10) || 5,
+      cooldownMs: parseInt(process.env.CIRCUIT_BREAKER_COOLDOWN_MS, 10) || 15000,
+      halfOpenMaxProbes: parseInt(process.env.CIRCUIT_BREAKER_HALF_OPEN_PROBES, 10) || 1,
     },
   },
 

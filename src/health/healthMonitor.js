@@ -24,6 +24,7 @@
 
 import healthStore from './healthStore.js';
 import config from '../config/index.js';
+import circuitBreakerManager from '../resilience/circuitBreakerManager.js';
 import { createChildLogger } from '../observability/logger.js';
 
 const log = createChildLogger({ module: 'health-monitor' });
@@ -96,9 +97,11 @@ class HealthMonitor {
 
       if (response.ok) {
         healthStore.recordResult(backend.id, true, elapsed);
+        circuitBreakerManager.recordSuccess(backend.id);
         log.debug(`Health check passed for ${backend.id} (${backend.url}) in ${elapsed.toFixed(2)}ms`);
       } else {
         healthStore.recordResult(backend.id, false, elapsed);
+        circuitBreakerManager.recordFailure(backend.id, `HTTP ${response.status}`);
         log.warn(`Health check failed for ${backend.id} (${backend.url}) with status: ${response.status}`);
       }
     } catch (error) {
@@ -109,6 +112,7 @@ class HealthMonitor {
       const errorMessage = isTimeout ? 'Request timeout' : error.message;
 
       healthStore.recordResult(backend.id, false, elapsed);
+      circuitBreakerManager.recordFailure(backend.id, errorMessage);
       log.error(`Health check error for ${backend.id} (${backend.url}): ${errorMessage}`);
     }
   }

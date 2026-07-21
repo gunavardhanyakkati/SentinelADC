@@ -28,9 +28,12 @@ const startTime = Date.now();
 
 // ─── Middleware ──────────────────────────────────────────────────────────────
 
-// Simulate variable processing latency (20-80ms)
+// Simulate variable processing latency (20-80ms) unless SIMULATE_LATENCY is set to false
 app.use((req, res, next) => {
   requestCount++;
+  if (process.env.SIMULATE_LATENCY === 'false') {
+    return next();
+  }
   const delay = Math.floor(Math.random() * 60) + 20;
   setTimeout(next, delay);
 });

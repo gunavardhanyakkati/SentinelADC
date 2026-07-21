@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  nginx-proxy:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend1
+      - backend2
+      - backend3
+
+  backend1:
+    build:
+      context: ..
+      dockerfile: Dockerfile.backend
+    environment:
+      - PORT=4001
+      - NODE_ID=backend-1
+      - SIMULATE_LATENCY=false
+
+  backend2:
+    build:
+      context: ..
+      dockerfile: Dockerfile.backend
+    environment:
+      - PORT=4002
+      - NODE_ID=backend-2
+      - SIMULATE_LATENCY=false
+
+  backend3:
+    build:
+      context: ..
+      dockerfile: Dockerfile.backend
+    environment:
+      - PORT=4003
+      - NODE_ID=backend-3
+      - SIMULATE_LATENCY=false

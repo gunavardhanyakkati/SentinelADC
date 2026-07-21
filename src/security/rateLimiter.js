@@ -34,8 +34,32 @@ import securityLogger from './securityLogger.js';
 class RateLimiter {
   constructor() {
     this.inMemoryStore = new Map();
+    this.penalizedIps = new Map(); // IP -> { maxRequests, expiresAt, reason }
     // Periodically clean up memory store to prevent leaks
     setInterval(() => this.cleanupMemoryStore(), 300000); // Clean every 5 mins
+  }
+
+  /**
+   * Apply an auto-enforced rate limit penalty to an IP.
+   * @param {string} ip
+   * @param {number} maxRequests
+   * @param {number} durationMs
+   * @param {string} reason
+   */
+  applyPenalty(ip, maxRequests = 10, durationMs = 300000, reason = 'statistical-anomaly') {
+    this.penalizedIps.set(ip, {
+      maxRequests,
+      expiresAt: Date.now() + durationMs,
+      reason,
+    });
+  }
+
+  /**
+   * Remove rate limit penalty for an IP.
+   * @param {string} ip
+   */
+  removePenalty(ip) {
+    return this.penalizedIps.delete(ip);
   }
 
   /**
@@ -53,6 +77,12 @@ class RateLimiter {
         this.inMemoryStore.set(ip, active);
       }
     }
+
+    for (const [ip, item] of this.penalizedIps.entries()) {
+      if (now > item.expiresAt) {
+        this.penalizedIps.delete(ip);
+      }
+    }
   }
 
   /**
@@ -62,13 +92,22 @@ class RateLimiter {
     return async (req, res, next) => {
       const clientIp = getClientIp(req);
       const windowMs = config.security.rateLimit.windowMs;
-      const maxRequests = config.security.rateLimit.maxRequests;
+      
+      let maxRequests = config.security.rateLimit.maxRequests;
+      const penalized = this.penalizedIps.get(clientIp);
+      if (penalized) {
+        if (Date.now() < penalized.expiresAt) {
+          maxRequests = penalized.maxRequests;
+        } else {
+          this.penalizedIps.delete(clientIp);
+        }
+      }
       
       const key = `sentinel:limit:${clientIp}`;
       const now = Date.now();
 
       // ─── Case 1: Redis Rate Limiting (Distributed) ─────────────────────────
-      if (cacheService.isActive()) {
+      if (cacheService.isActive() && cacheService.client) {
         try {
           const redis = cacheService.client;
           

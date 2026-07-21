@@ -22,6 +22,8 @@ import config from '../config/index.js';
 import { createChildLogger } from '../observability/logger.js';
 import strategyFactory from './strategyFactory.js';
 
+import circuitBreakerManager from '../resilience/circuitBreakerManager.js';
+
 const log = createChildLogger({ module: 'routing' });
 
 class RoutingEngine {
@@ -33,10 +35,11 @@ class RoutingEngine {
 
   /**
    * Get the list of currently healthy backends.
+   * Filters out backends marked unhealthy or in an OPEN circuit breaker state.
    * @returns {import('../config/backends.js').Backend[]}
    */
   getHealthyBackends() {
-    return this._pool.filter((b) => b.healthy);
+    return this._pool.filter((b) => b.healthy && circuitBreakerManager.canExecute(b.id));
   }
 
   /**

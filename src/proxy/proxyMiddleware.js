@@ -39,13 +39,24 @@
  * - What happens when the upstream server is slower than the client?
  */
 
+import http from 'node:http';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { createChildLogger } from '../observability/logger.js';
 import { addProxyHeaders, addResponseHeaders } from './proxyUtils.js';
 import { TIMEOUTS } from '../utils/constants.js';
 import { collectProxyResponse, collectProxyError } from '../metrics/metricsCollector.js';
+import circuitBreakerManager from '../resilience/circuitBreakerManager.js';
 
 const log = createChildLogger({ module: 'proxy' });
+
+// Persistent HTTP Agent with Keep-Alive to avoid TCP connection overhead on every proxied request
+const keepAliveAgent = new http.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 1000,
+  maxFreeSockets: 256,
+  timeout: TIMEOUTS.PROXY_TIMEOUT,
+});
 
 /**
  * Create the reverse proxy middleware.
@@ -56,6 +67,8 @@ const log = createChildLogger({ module: 'proxy' });
  */
 export default function createProxyMiddleware_(routingEngine) {
   const proxyMiddleware = createProxyMiddleware({
+    agent: keepAliveAgent,
+
     // Dynamic target: the router function is called for every request
     router: (req) => {
       // The routing engine should have already attached the target
@@ -84,6 +97,9 @@ export default function createProxyMiddleware_(routingEngine) {
           decremented = true;
           backend.activeConnections = Math.max(0, (backend.activeConnections || 1) - 1);
           log.debug(`Connection closed/finished. Active connections for ${backend.id}: ${backend.activeConnections}`);
+          if (backend.onDrainComplete && backend.activeConnections === 0) {
+            backend.onDrainComplete();
+          }
         }
       };
       req.res?.on('finish', decrement);
@@ -124,6 +140,14 @@ export default function createProxyMiddleware_(routingEngine) {
         addResponseHeaders(proxyRes, req, res);
         collectProxyResponse(req, proxyRes);
 
+        if (req._backendId) {
+          if (proxyRes.statusCode >= 500) {
+            circuitBreakerManager.recordFailure(req._backendId, `HTTP ${proxyRes.statusCode}`);
+          } else if (proxyRes.statusCode < 400) {
+            circuitBreakerManager.recordSuccess(req._backendId);
+          }
+        }
+
         log.debug('Proxy response received', {
           status: proxyRes.statusCode,
           backend: req._backendId,
@@ -137,6 +161,10 @@ export default function createProxyMiddleware_(routingEngine) {
        */
       error: (err, req, res) => {
         collectProxyError(req, err);
+
+        if (req._backendId) {
+          circuitBreakerManager.recordFailure(req._backendId, err.code || err.message);
+        }
 
         log.error('Proxy error', {
           error: err.message,

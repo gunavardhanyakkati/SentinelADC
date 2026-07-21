@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
+    "test": "node --test tests/*.test.js",
     "backend": "node backends/server.js",
     "benchmark": "node benchmarks/run.js",
     "docker:up": "docker-compose up --build",

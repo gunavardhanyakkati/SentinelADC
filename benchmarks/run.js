@@ -21,7 +21,7 @@ import autocannon from 'autocannon';
 import path from 'path';
 
 const GATEWAY_URL = 'http://localhost:3000';
-const BENCHMARK_DURATION_SEC = 5;
+const BENCHMARK_DURATION_SEC = 30;
 
 // Helper to sleep/wait
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -75,21 +75,23 @@ async function main() {
   const children = [];
   
   try {
-    // 1. Boot 3 Mock Backend Servers
+    // 1. Boot 3 Mock Backend Servers (SIMULATE_LATENCY=false for raw gateway proxy profiling)
     console.log('⏳ Booting 3 Mock Backend Server instances...');
-    children.push(startServer('backends/server.js', { PORT: '4001', SERVER_NAME: 'backend-1' }));
-    children.push(startServer('backends/server.js', { PORT: '4002', SERVER_NAME: 'backend-2' }));
-    children.push(startServer('backends/server.js', { PORT: '4003', SERVER_NAME: 'backend-3' }));
+    children.push(startServer('backends/server.js', { PORT: '4001', SERVER_NAME: 'backend-1', SIMULATE_LATENCY: 'false' }));
+    children.push(startServer('backends/server.js', { PORT: '4002', SERVER_NAME: 'backend-2', SIMULATE_LATENCY: 'false' }));
+    children.push(startServer('backends/server.js', { PORT: '4003', SERVER_NAME: 'backend-3', SIMULATE_LATENCY: 'false' }));
     
     // Wait for backends to bind to ports
     await delay(2000);
 
-    // 2. Boot ADC Gateway with high rate limits to prevent benchmark drops
-    console.log('⏳ Booting SentinelADC Gateway Proxy...');
+    // 2. Boot ADC Gateway with high rate limits and TLS enabled
+    console.log('⏳ Booting SentinelADC Gateway Proxy (HTTP & HTTPS)...');
     children.push(startServer('src/index.js', { 
       LOG_LEVEL: 'warn', 
       REDIS_URL: 'offline', 
       MONGO_URI: 'offline',
+      TLS_ENABLED: 'true',
+      TLS_PORT: '8443',
       RATE_LIMIT_MAX_REQUESTS: '1000000' // Bypasses rate limiter blocks
     }));
     
@@ -130,6 +132,18 @@ async function main() {
     });
 
     // ─────────────────────────────────────────────────────────────────────────
+    // SCENARIO 4: HTTPS TLS Termination
+    // ─────────────────────────────────────────────────────────────────────────
+    // We send HTTPS requests to measure TLS handshake and AES encryption overhead.
+    const tlsResults = await runAutocannon('Scenario 4: HTTPS TLS Termination Passthrough', {
+      url: 'https://localhost:8443',
+      method: 'POST',
+      body: JSON.stringify({ ping: 'pong' }),
+      headers: { 'Content-Type': 'application/json' },
+      tls: { rejectUnauthorized: false },
+    });
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Print Comparison Report
     // ─────────────────────────────────────────────────────────────────────────
     console.log('\n═══════════════════════════════════════════════════════════════');
@@ -139,33 +153,59 @@ async function main() {
     const reportData = [
       {
         Metric: 'Throughput (Reqs/Sec)',
-        'Raw Proxy': Math.round(rawResults.requests.average),
+        'Raw HTTP': Math.round(rawResults.requests.average),
         'Cached Hit': Math.round(cachedResults.requests.average),
         'WAF Screening': Math.round(wafResults.requests.average),
+        'HTTPS (TLS)': Math.round(tlsResults.requests.average),
       },
       {
         Metric: 'Average Latency (ms)',
-        'Raw Proxy': rawResults.latency.average,
-        'Cached Hit': cachedResults.latency.average,
-        'WAF Screening': wafResults.latency.average,
+        'Raw HTTP': Math.round(rawResults.latency.average * 100) / 100,
+        'Cached Hit': Math.round(cachedResults.latency.average * 100) / 100,
+        'WAF Screening': Math.round(wafResults.latency.average * 100) / 100,
+        'HTTPS (TLS)': Math.round(tlsResults.latency.average * 100) / 100,
       },
       {
-        Metric: 'Max Latency (ms)',
-        'Raw Proxy': rawResults.latency.max,
-        'Cached Hit': cachedResults.latency.max,
-        'WAF Screening': wafResults.latency.max,
+        Metric: 'p50 Latency (ms)',
+        'Raw HTTP': rawResults.latency.p50,
+        'Cached Hit': cachedResults.latency.p50,
+        'WAF Screening': wafResults.latency.p50,
+        'HTTPS (TLS)': tlsResults.latency.p50,
+      },
+      {
+        Metric: 'p97.5 Latency (ms)',
+        'Raw HTTP': rawResults.latency.p97_5 || rawResults.latency['p97.5'],
+        'Cached Hit': cachedResults.latency.p97_5 || cachedResults.latency['p97.5'],
+        'WAF Screening': wafResults.latency.p97_5 || wafResults.latency['p97.5'],
+        'HTTPS (TLS)': tlsResults.latency.p97_5 || tlsResults.latency['p97.5'],
       },
       {
         Metric: 'p99 Latency (ms)',
-        'Raw Proxy': rawResults.latency.p99,
+        'Raw HTTP': rawResults.latency.p99,
         'Cached Hit': cachedResults.latency.p99,
         'WAF Screening': wafResults.latency.p99,
+        'HTTPS (TLS)': tlsResults.latency.p99,
+      },
+      {
+        Metric: 'Max Latency (ms)',
+        'Raw HTTP': rawResults.latency.max,
+        'Cached Hit': cachedResults.latency.max,
+        'WAF Screening': wafResults.latency.max,
+        'HTTPS (TLS)': tlsResults.latency.max,
+      },
+      {
+        Metric: 'Errors / Timeouts',
+        'Raw HTTP': (rawResults.errors || 0) + (rawResults.timeouts || 0),
+        'Cached Hit': (cachedResults.errors || 0) + (cachedResults.timeouts || 0),
+        'WAF Screening': (wafResults.errors || 0) + (wafResults.timeouts || 0),
+        'HTTPS (TLS)': (tlsResults.errors || 0) + (tlsResults.timeouts || 0),
       },
       {
         Metric: 'Transfer Rate (MB/s)',
-        'Raw Proxy': (rawResults.throughput.average / 1024 / 1024).toFixed(2),
+        'Raw HTTP': (rawResults.throughput.average / 1024 / 1024).toFixed(2),
         'Cached Hit': (cachedResults.throughput.average / 1024 / 1024).toFixed(2),
         'WAF Screening': (wafResults.throughput.average / 1024 / 1024).toFixed(2),
+        'HTTPS (TLS)': (tlsResults.throughput.average / 1024 / 1024).toFixed(2),
       },
     ];
 

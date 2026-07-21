@@ -58,6 +58,12 @@ class CacheService {
    * Connect to the Redis instance.
    */
   connect() {
+    if (config.redis.host === 'offline' || process.env.REDIS_URL === 'offline' || process.env.REDIS_HOST === 'offline') {
+      log.info('Redis disabled via offline configuration. Operating in pure in-memory cache mode.');
+      this.useMemoryFallback = true;
+      return;
+    }
+
     try {
       this.client = new Redis({
         host: config.redis.host,
