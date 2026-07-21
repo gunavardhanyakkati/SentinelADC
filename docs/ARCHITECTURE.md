@@ -4,109 +4,80 @@ This document details the architectural design and structural layers of Sentinel
 
 ## Architectural Layers
 
-SentinelADC is structured as a pipeline of modular layers. Each layer executes sequentially, operating on the request-response lifecycle before handing control over to the next module.
+SentinelADC is structured as a pipeline of modular layers with dual HTTP (`:3000`) and HTTPS (`:8443`) listeners sharing a unified Express application context. Each layer executes sequentially, operating on the request-response lifecycle before handing control over to downstream modules.
 
 ```
-       [ Client Request ]
-               |
-               v
-  +─────────────────────────+
-  |  1. Trace & Correlation |  - Generates trace UUID
-  +─────────────────────────+  - Binds request context
-               |
-               v
-  +─────────────────────────+
-  |  2. Network Firewall    |  - Set-based IP blocklist checks
-  +─────────────────────────+  - User-agent bots validation
-               |
-               v
-  +─────────────────────────+
-  |  3. Rate Limiting       |  - Caps client request limits per minute
-  +─────────────────────────+  - Prevents resource exhaustion
-               |
-               v
-  +─────────────────────────+
-  |  4. Security WAF        |  - Screens payloads for SQLi and XSS
-  +─────────────────────────+  - Parses request parameters & bodies
-               |
-               v
-  +─────────────────────────+
-  |  5. Caching Layer       |  - Looks up cache storage (Redis / RAM)
-  +─────────────────────────+  - Bypasses pools on hits
-               |
-               | (Cache Miss)
-               v
-  +─────────────────────────+
-  |  6. Load Balancer       |  - Chooses target node (RR, WRR, LC, Hash)
-  +─────────────────────────+  - Inspects active connections & scores
-               |
-               v
-  +─────────────────────────+
-  |  7. Reverse Proxy       |  - Rewrites headers (X-Forwarded-*)
-  +─────────────────────────+  - Forwards stream downstream
-               |
-               v
-       [ Upstream Node ]
+       [ Client Request (HTTP :3000 / HTTPS :8443) ]
+                           |
+                           v
+   +───────────────────────────────────────────────+
+   |  1. TLS Termination & 301 Redirection         |  - Decrypts HTTPS (:8443)
+   +───────────────────────────────────────────────+  - 301 redirect if TLS_REDIRECT=true
+                           |
+                           v
+   +───────────────────────────────────────────────+
+   |  2. Trace & Correlation Context               |  - Generates trace UUIDv4
+   +───────────────────────────────────────────────+  - Node AsyncLocalStorage context
+                           |
+                           v
+   +───────────────────────────────────────────────+
+   |  3. L3/L4 Network Firewall                    |  - Set-based IP blocklist lookup
+   +───────────────────────────────────────────────+  - User-Agent scanner filter
+                           |
+                           v
+   +───────────────────────────────────────────────+
+   |  4. Rate Limiter & EWMA Anomaly Detector      |  - Sliding-window rate limiters
+   +───────────────────────────────────────────────+  - EWMA Z-Score spike detection
+                           |                          - Soft auto-enforcement penalty
+                           v
+   +───────────────────────────────────────────────+
+   |  5. Web Application Firewall (WAF)            |  - SQLi & XSS regex screening
+   +───────────────────────────────────────────────+  - Evaluated before cache lookup
+                           |
+                           v
+   +───────────────────────────────────────────────+
+   |  6. Response Caching Layer                    |  - Redis / RAM storage lookup
+   +───────────────────────────────────────────────+  - Stream monkey-patching
+                           | (Cache Miss)
+                           v
+   +───────────────────────────────────────────────+
+   |  7. L7 Load Balancer & Circuit Breaker        |  - RR, WRR, Least Connections, IP Hash
+   +───────────────────────────────────────────────+  - CLOSED / OPEN / HALF_OPEN states
+                           |                          - Maintenance Connection Draining
+                           v
+   +───────────────────────────────────────────────+
+   |  8. Upstream Reverse Proxy                     |  - Persistent http.Agent Keep-Alive
+   +───────────────────────────────────────────────+  - Header rewriting (X-Forwarded-*)
+                           |
+                           v
+                 [ Upstream Backend Pool ]
 ```
 
 ---
 
 ## 1. Request Lifecycle Routing
 
-### Tracing and Context
-Incoming requests first trigger the response timer and correlation ID middleware. The correlation ID is generated via UUIDv4 and set as a request property (`req.correlationId`). Node's native `AsyncLocalStorage` wraps subsequent callback executions in this context, allowing the Winston structured logger to automatically query and output the trace ID.
+### TLS Termination & Tracing Context
+Client connections arrive via plain HTTP (`:3000`) or native HTTPS (`:8443`). When `TLS_REDIRECT=true`, unencrypted HTTP traffic is upgraded via status 301. On entry, a correlation ID (`req.correlationId`) is assigned and wrapped in Node's `AsyncLocalStorage` context so all logger outputs carry trace contexts automatically.
 
-### Edge Filters and Rate Limits
-Requests pass through the Set-based IP blocklist lookup which offers O(1) matching. The rate limiter then increments request counters mapped to the client IP in Redis (or in-memory sliding-window arrays if Redis is offline), returning HTTP 429 if the request limits are exceeded.
+### Firewall, Rate Limiting & Statistical Anomaly Detection
+Requests pass through an $O(1)$ Set-based IP blocklist check. The Statistical Anomaly Detector tracks per-IP request rates using an Exponentially Weighted Moving Average (EWMA, $\alpha=0.3$) and online Welford variance calculations. If $z \ge 3.0$ and volume $\ge 15 \text{ req/min}$, an anomaly is flagged. Under auto-enforcement, the IP's rate limit is temporarily capped (10 req/min for 5 minutes).
 
-### Web Application Firewall (WAF)
-Requests destined for administrative paths are parsed for JSON or URL-encoded payloads. The WAF checks request paths, query strings, and body variables against regex signatures designed to match SQL injection (SQLi) keywords and cross-site scripting (XSS) tag injections. Malicious matches trigger an immediate HTTP 403 response.
+### Web Application Firewall (WAF) & Caching
+Positioned *before* cache lookups to prevent WAF bypass attacks on cached routes, the WAF parses paths, query strings, and POST bodies for SQLi and XSS regex threat signatures. Valid GET requests then query Redis/RAM cache storage; cache hits return immediately with `x-cache: HIT`.
 
-### Cache Lookup
-If the request is a GET and caching is enabled, the cache middleware computes a cache key based on the URL path. It queries Redis (or local Map-based cache structures). If present, the cached payload is written directly to the client with an `x-cache: HIT` header, and the pipeline terminates. If a cache miss occurs, the request proceeds.
+### Load Balancing, Circuit Breakers & Connection Draining
+For cache misses, the Load Balancer selects an optimal backend:
+- **Circuit Breakers (`CLOSED`/`OPEN`/`HALF_OPEN`)**: Excludes backends that hit 5 consecutive 5xx/connection errors. After a 15s cooldown, `HALF_OPEN` state allows a trial probe. Both live probes and active `/health` checks feed into a single state machine to restore `CLOSED` status.
+- **Connection Draining (`DRAINING`/`OFFLINE`)**: When maintenance mode is triggered via `POST /api/admin/backends/:id/drain`, new requests are routed away from the backend while active in-flight requests finish cleanly before status switches to `OFFLINE`.
 
-### Load Balancing and Upstream Dispatch
-The load balancer selects an online, healthy server from the active pool using the configured algorithm. If Least Connections or Weighted Round Robin is active, the pool manager factors in node performance scores derived from historical response times and error records. The proxy module then rewrites client headers (attaching standard `X-Forwarded-*` headers) and streams the request downstream.
-
----
-
-## 2. Dynamic Memory Fallbacks
-
-Production systems need resilience when secondary stores go offline. SentinelADC implements a dynamic fail-open database fallback mechanism:
-
-```
-            +─────────────────────────────+
-            |      Database Operation     |
-            +─────────────────────────────+
-                           |
-            +--------------+--------------+
-            |                             |
-      (Mongo/Redis OK)             (Connection Error)
-            |                             |
-            v                             v
-  +───────────────────+         +───────────────────+
-  |  Standard Queries |         |  Activate Memory  |
-  |  to Database      |         |  Fallback Engine  |
-  +───────────────────+         +───────────────────+
-                                          |
-                                          v
-                                +───────────────────+
-                                | Perform Map/Array |
-                                | Operations in RAM |
-                                +───────────────────+
-```
-
-### Caching and Rate Limiting Fallbacks
-If Redis is offline, the caching engine uses a localized Map with automatic key expiration checks, while the rate limiter switches to in-memory sliding arrays to track client request intervals.
-
-### Telemetry Database Fallbacks
-If MongoDB is offline, the analytics engine records transaction logs in a sliding-window array. The background rollup worker aggregates these logs using JavaScript array metrics, populating the memory timeline bucket so that the dashboard routes return valid charts and telemetry data.
+### Upstream Proxying
+The proxy streams requests downstream using a persistent `http.Agent` connection pool (`keepAlive: true`, `maxSockets: 1000`), avoiding TCP handshake churn and achieving **753 RPS** at **128ms** median latency.
 
 ---
 
-## 3. Passive vs. Active Monitoring
+## 2. Dynamic Database Fallbacks
 
-SentinelADC combines active background health checks with passive performance tracking:
-
-* **Active Health Monitoring**: A background interval process pings backend servers on `/health` at set intervals. Servers failing multiple checks are marked offline.
-* **Passive Performance Tracking**: The gateway metrics engine tracks response latency and success rates during active client transactions. This computes a performance score (0-100) per server. If a server responds slowly, its performance score drops, prompting algorithms like Weighted Round Robin to route traffic away from it before the background monitor officially flags it as offline.
+SentinelADC features dynamic fail-open database fallback capabilities:
+- **Redis Offline**: Switches caching and rate limiting engines to localized memory `Map` namespaces.
+- **MongoDB Offline**: Switches analytics logs to an in-memory transactional log buffer with custom JavaScript grouping logic.
