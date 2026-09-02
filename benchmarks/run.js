@@ -9,18 +9,17 @@
  * DESIGN DECISIONS:
  * - Programmatically executes `autocannon` stress tests.
  * - Automates startup and teardown of 3 mock backend instances and the ADC gateway.
- * - Compares three scenarios:
+ * - Compares four scenarios:
  *   1. Raw Reverse Proxy (Round Robin)
  *   2. Cached Proxy (GET caching hit)
  *   3. WAF Filter Screening (evaluates SQLi/XSS inspection overhead)
+ *   4. HTTPS TLS Termination Passthrough
  */
-// run.js
 
 import { spawn } from 'child_process';
 import autocannon from 'autocannon';
-import path from 'path';
 
-const GATEWAY_URL = 'http://localhost:3000';
+const GATEWAY_URL = 'http://127.0.0.1:3000';
 const BENCHMARK_DURATION_SEC = 30;
 
 // Helper to sleep/wait
@@ -84,7 +83,7 @@ async function main() {
     // Wait for backends to bind to ports
     await delay(2000);
 
-    // 2. Boot ADC Gateway with high rate limits and TLS enabled
+    // 2. Boot ADC Gateway with high rate limits and explicit 127.0.0.1 IP routing
     console.log('⏳ Booting SentinelADC Gateway Proxy (HTTP & HTTPS)...');
     children.push(startServer('src/index.js', { 
       LOG_LEVEL: 'warn', 
@@ -92,7 +91,8 @@ async function main() {
       MONGO_URI: 'offline',
       TLS_ENABLED: 'true',
       TLS_PORT: '8443',
-      RATE_LIMIT_MAX_REQUESTS: '1000000' // Bypasses rate limiter blocks
+      RATE_LIMIT_MAX_REQUESTS: '1000000', // Bypasses rate limiter blocks
+      BACKENDS: 'http://127.0.0.1:4001,http://127.0.0.1:4002,http://127.0.0.1:4003',
     }));
     
     // Wait for gateway boot and initial health checks to complete
@@ -102,7 +102,6 @@ async function main() {
     // ─────────────────────────────────────────────────────────────────────────
     // SCENARIO 1: Raw Proxying (Round Robin)
     // ─────────────────────────────────────────────────────────────────────────
-    // We send POST requests to bypass the cache middleware entirely.
     const rawResults = await runAutocannon('Scenario 1: Raw Reverse Proxying (POST -> Backend)', {
       method: 'POST',
       body: JSON.stringify({ ping: 'pong' }),
@@ -112,7 +111,6 @@ async function main() {
     // ─────────────────────────────────────────────────────────────────────────
     // SCENARIO 2: Cache Hit
     // ─────────────────────────────────────────────────────────────────────────
-    // We warm the cache first, then run GET requests.
     console.log('\n⏳ Warming cache storage...');
     await fetch(GATEWAY_URL);
     await delay(500);
@@ -124,7 +122,6 @@ async function main() {
     // ─────────────────────────────────────────────────────────────────────────
     // SCENARIO 3: WAF Attack Screening
     // ─────────────────────────────────────────────────────────────────────────
-    // We send payload patterns containing SQLi keywords to stress WAF regex scanner.
     const wafResults = await runAutocannon('Scenario 3: WAF Scanner overhead (POST SQLi Payloads)', {
       method: 'POST',
       body: JSON.stringify({ query: 'SELECT * FROM users; DROP TABLE admin;' }),
@@ -134,9 +131,8 @@ async function main() {
     // ─────────────────────────────────────────────────────────────────────────
     // SCENARIO 4: HTTPS TLS Termination
     // ─────────────────────────────────────────────────────────────────────────
-    // We send HTTPS requests to measure TLS handshake and AES encryption overhead.
     const tlsResults = await runAutocannon('Scenario 4: HTTPS TLS Termination Passthrough', {
-      url: 'https://localhost:8443',
+      url: 'https://127.0.0.1:8443',
       method: 'POST',
       body: JSON.stringify({ ping: 'pong' }),
       headers: { 'Content-Type': 'application/json' },

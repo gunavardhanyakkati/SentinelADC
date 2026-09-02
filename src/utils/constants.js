@@ -34,6 +34,7 @@ export const LB_ALGORITHMS = {
   LEAST_CONNECTIONS: 'least-connections',
   WEIGHTED_ROUND_ROBIN: 'weighted-round-robin',
   IP_HASH: 'ip-hash',
+  CONSISTENT_HASH: 'consistent-hash',
 };
 
 // ─── Cache Headers ──────────────────────────────────────────────────────────

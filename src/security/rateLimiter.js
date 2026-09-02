@@ -1,28 +1,36 @@
 /**
- * ─── Rate Limiter ────────────────────────────────────────────────────────────
+ * ─── Rate Limiter (Token Bucket with Redis Lua Scripting) ────────────────────
  *
  * WHY THIS EXISTS:
  * Rate limiting prevents Denial of Service (DoS) attacks, brute-force login attempts,
- * and origin resource exhaustion by capping the number of requests a single client
- * IP can make within a configured time window.
+ * and origin resource exhaustion by capping client IP request rates.
+ *
+ * ALGORITHM: TOKEN BUCKET
+ * - Each client IP has a bucket with a maximum `capacity` (burst limit) and a
+ *   continuous `refillRate` (tokens per millisecond = maxRequests / windowMs).
+ * - On each request, tokens are refilled based on elapsed time:
+ *     tokens = min(capacity, tokens + elapsed * refillRate)
+ * - If tokens >= cost (default 1), 1 token is consumed and the request proceeds.
+ * - If tokens < cost, the request is throttled (HTTP 429) with a precise `Retry-After`.
  *
  * DESIGN DECISIONS:
- * - Dual-Mode Operation: Uses Redis (incr + expire atomic operations) if active
- *   for distributed rate limiting, falling back to a clean sliding-window array
- *   in RAM if Redis is offline (fail-safe offline support).
- * - Appends standard rate limit headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`,
- *   `X-RateLimit-Reset`) to the HTTP response.
+ * - Redis Lua Script (`EVAL`): Executes token calculation and consumption atomically
+ *   in single-threaded Redis, eliminating Time-of-Check to Time-of-Use (TOCTOU)
+ *   race conditions without distributed locks.
+ * - In-Memory Fallback: If Redis is offline, operates an in-memory JS Map implementing
+ *   the identical Token Bucket algorithm (fail-safe operation).
  *
  * INTERVIEW QUESTIONS:
- * - What is the difference between Token Bucket, Leaking Bucket, and Fixed Window Rate Limiting?
- *   (Fixed Window counts requests in set time buckets—easy but vulnerable to traffic spikes
- *   at bucket boundaries. Token Bucket allows burst capacity and shapes traffic more smoothly)
- * - How does distributed rate limiting differ from local rate limiting?
- *   (Local rate limiting only throttles traffic on a single node. Distributed rate limiting
- *   uses a shared store like Redis to sync request states across multiple gateway instances)
- * - What are the race conditions in fixed-window limiters, and how do we solve them?
- *   (If get-and-set operations are not atomic, concurrent requests might bypass the limit.
- *   Solved in Redis using atomic `INCR` + `EXPIRE` transactions or Lua scripts)
+ * - Why Token Bucket over Fixed Window Rate Limiting?
+ *   (Fixed window suffers from boundary burst vulnerability—e.g. 100 requests at 00:59
+ *   and 100 requests at 01:00 = 200 requests in 2 seconds. Token Bucket smooths traffic
+ *   refills continuously while permitting controlled burst capacity up to `capacity`).
+ * - Why use a Redis Lua Script?
+ *   (Lua scripts execute atomically inside Redis. Reading token count, calculating refill,
+ *   updating tokens, and setting EXPIRE happens in a single atomic step, avoiding race conditions).
+ * - How do you prevent stale key accumulation in Redis/RAM?
+ *   (Redis keys auto-expire via EXPIRE after TTL = capacity/refillRate. Memory store periodically
+ *   evicts inactive buckets).
  */
 
 import cacheService from '../cache/cacheService.js';
@@ -31,20 +39,57 @@ import { HTTP_STATUS } from '../utils/constants.js';
 import { getClientIp } from '../utils/helpers.js';
 import securityLogger from './securityLogger.js';
 
+// Lua script for atomic Token Bucket evaluation in Redis
+const TOKEN_BUCKET_LUA = `
+local key = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local refillRate = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+local cost = tonumber(ARGV[4])
+
+local data = redis.call('HMGET', key, 'tokens', 'lastRefill')
+local tokens = tonumber(data[1])
+local lastRefill = tonumber(data[2])
+
+if not tokens or not lastRefill then
+  tokens = capacity
+  lastRefill = now
+else
+  local elapsed = math.max(0, now - lastRefill)
+  tokens = math.min(capacity, tokens + (elapsed * refillRate))
+  lastRefill = now
+end
+
+local allowed = 0
+local retryAfterMs = 0
+
+if tokens >= cost then
+  allowed = 1
+  tokens = tokens - cost
+else
+  allowed = 0
+  retryAfterMs = math.ceil((cost - tokens) / refillRate)
+end
+
+local ttlSeconds = math.ceil(capacity / (refillRate * 1000)) + 60
+redis.call('HMSET', key, 'tokens', tokens, 'lastRefill', lastRefill)
+redis.call('EXPIRE', key, ttlSeconds)
+
+return { allowed, math.floor(tokens), retryAfterMs }
+`;
+
 class RateLimiter {
   constructor() {
-    this.inMemoryStore = new Map();
+    // Map: IP -> { tokens, lastRefill } for in-memory fallback
+    this.memoryBuckets = new Map();
     this.penalizedIps = new Map(); // IP -> { maxRequests, expiresAt, reason }
-    // Periodically clean up memory store to prevent leaks
-    setInterval(() => this.cleanupMemoryStore(), 300000); // Clean every 5 mins
+
+    // Periodically clean up stale memory buckets
+    setInterval(() => this.cleanupMemoryStore(), 300000);
   }
 
   /**
    * Apply an auto-enforced rate limit penalty to an IP.
-   * @param {string} ip
-   * @param {number} maxRequests
-   * @param {number} durationMs
-   * @param {string} reason
    */
   applyPenalty(ip, maxRequests = 10, durationMs = 300000, reason = 'statistical-anomaly') {
     this.penalizedIps.set(ip, {
@@ -56,25 +101,19 @@ class RateLimiter {
 
   /**
    * Remove rate limit penalty for an IP.
-   * @param {string} ip
    */
   removePenalty(ip) {
     return this.penalizedIps.delete(ip);
   }
 
   /**
-   * Remove expired timestamps from local map.
+   * Remove expired memory buckets and penalties.
    */
   cleanupMemoryStore() {
     const now = Date.now();
-    const windowMs = config.security.rateLimit.windowMs;
-
-    for (const [ip, timestamps] of this.inMemoryStore.entries()) {
-      const active = timestamps.filter(t => now - t < windowMs);
-      if (active.length === 0) {
-        this.inMemoryStore.delete(ip);
-      } else {
-        this.inMemoryStore.set(ip, active);
+    for (const [ip, bucket] of this.memoryBuckets.entries()) {
+      if (now - bucket.lastRefill > 300000) {
+        this.memoryBuckets.delete(ip);
       }
     }
 
@@ -86,102 +125,126 @@ class RateLimiter {
   }
 
   /**
-   * Express middleware to enforce rate limits.
+   * Evaluate Token Bucket in-memory (local fallback).
+   */
+  evalTokenBucketMemory(ip, capacity, refillRate, now, cost = 1) {
+    let bucket = this.memoryBuckets.get(ip);
+    if (!bucket) {
+      bucket = { tokens: capacity, lastRefill: now };
+      this.memoryBuckets.set(ip, bucket);
+    } else {
+      const elapsed = Math.max(0, now - bucket.lastRefill);
+      bucket.tokens = Math.min(capacity, bucket.tokens + (elapsed * refillRate));
+      bucket.lastRefill = now;
+    }
+
+    if (bucket.tokens >= cost) {
+      bucket.tokens -= cost;
+      return {
+        allowed: true,
+        remaining: Math.floor(bucket.tokens),
+        retryAfterMs: 0,
+      };
+    } else {
+      const missingTokens = cost - bucket.tokens;
+      const retryAfterMs = Math.ceil(missingTokens / refillRate);
+      return {
+        allowed: false,
+        remaining: Math.floor(bucket.tokens),
+        retryAfterMs,
+      };
+    }
+  }
+
+  /**
+   * Evaluate Token Bucket in Redis via atomic Lua script.
+   */
+  async evalTokenBucketRedis(ip, capacity, refillRate, now, cost = 1) {
+    const key = `sentinel:tokenbucket:${ip}`;
+    const redis = cacheService.client;
+
+    const res = await redis.eval(
+      TOKEN_BUCKET_LUA,
+      1,
+      key,
+      capacity,
+      refillRate,
+      now,
+      cost
+    );
+
+    const [allowed, remaining, retryAfterMs] = res;
+    return {
+      allowed: Boolean(allowed),
+      remaining: Number(remaining),
+      retryAfterMs: Number(retryAfterMs),
+    };
+  }
+
+  /**
+   * Express middleware to enforce Token Bucket rate limiting.
    */
   middleware() {
     return async (req, res, next) => {
       const clientIp = getClientIp(req);
       const windowMs = config.security.rateLimit.windowMs;
       
-      let maxRequests = config.security.rateLimit.maxRequests;
+      let capacity = config.security.rateLimit.maxRequests;
       const penalized = this.penalizedIps.get(clientIp);
       if (penalized) {
         if (Date.now() < penalized.expiresAt) {
-          maxRequests = penalized.maxRequests;
+          capacity = penalized.maxRequests;
         } else {
           this.penalizedIps.delete(clientIp);
         }
       }
-      
-      const key = `sentinel:limit:${clientIp}`;
+
+      const refillRate = capacity / windowMs; // Tokens per millisecond
       const now = Date.now();
 
-      // ─── Case 1: Redis Rate Limiting (Distributed) ─────────────────────────
+      let result;
+
+      // Case 1: Redis Distributed Token Bucket
       if (cacheService.isActive() && cacheService.client) {
         try {
-          const redis = cacheService.client;
-          
-          // Increment request counter atomically
-          const current = await redis.incr(key);
-          
-          if (current === 1) {
-            // Set expiration on first request in window
-            await redis.pexpire(key, windowMs);
-          }
-
-          const ttl = await redis.pttl(key);
-          const remaining = Math.max(0, maxRequests - current);
-
-          // Set standard RFC rate limiting headers
-          res.setHeader('X-RateLimit-Limit', maxRequests);
-          res.setHeader('X-RateLimit-Remaining', remaining);
-          res.setHeader('X-RateLimit-Reset', new Date(now + ttl).toISOString());
-
-          if (current > maxRequests) {
-            securityLogger.logEvent('rate-limit', req, {
-              reason: `Rate limit exceeded (Redis). Limit: ${maxRequests}, Actual: ${current}`,
-            });
-
-            return res.status(HTTP_STATUS.TOO_MANY_REQUESTS).json({
-              error: {
-                message: 'Too Many Requests — Rate limit exceeded. Please try again later.',
-                statusCode: HTTP_STATUS.TOO_MANY_REQUESTS,
-                limit: maxRequests,
-                retryAfter: `${Math.ceil(ttl / 1000)}s`,
-              },
-              timestamp: new Date().toISOString(),
-            });
-          }
-
-          return next();
+          result = await this.evalTokenBucketRedis(clientIp, capacity, refillRate, now, 1);
         } catch (err) {
-          // Fall back to memory limiting on Redis failure
           securityLogger.logEvent('rate-limit-fallback', req, {
-            reason: `Redis rate limiting failed (${err.message}). Falling back to memory.`,
+            reason: `Redis Token Bucket failed (${err.message}). Falling back to memory.`,
           });
+          result = this.evalTokenBucketMemory(clientIp, capacity, refillRate, now, 1);
         }
+      } else {
+        // Case 2: In-Memory Token Bucket Fallback
+        result = this.evalTokenBucketMemory(clientIp, capacity, refillRate, now, 1);
       }
 
-      // ─── Case 2: Memory Rate Limiting (Local Fallback) ─────────────────────
-      const timestamps = this.inMemoryStore.get(clientIp) || [];
-      const active = timestamps.filter(t => now - t < windowMs);
+      const resetTimestamp = new Date(now + Math.ceil((capacity - result.remaining) / refillRate)).toISOString();
 
-      const current = active.length + 1;
-      const remaining = Math.max(0, maxRequests - current);
-      const resetTime = now + windowMs;
+      res.setHeader('X-RateLimit-Limit', capacity);
+      res.setHeader('X-RateLimit-Remaining', result.remaining);
+      res.setHeader('X-RateLimit-Reset', resetTimestamp);
 
-      res.setHeader('X-RateLimit-Limit', maxRequests);
-      res.setHeader('X-RateLimit-Remaining', remaining);
-      res.setHeader('X-RateLimit-Reset', new Date(resetTime).toISOString());
+      if (!result.allowed) {
+        const retryAfterSec = Math.max(1, Math.ceil(result.retryAfterMs / 1000));
+        res.setHeader('Retry-After', retryAfterSec);
 
-      if (current > maxRequests) {
         securityLogger.logEvent('rate-limit', req, {
-          reason: `Rate limit exceeded (In-Memory). Limit: ${maxRequests}, Actual: ${current}`,
+          reason: `Token Bucket rate limit exceeded for IP ${clientIp}. Capacity: ${capacity}, Remaining: ${result.remaining}`,
         });
 
         return res.status(HTTP_STATUS.TOO_MANY_REQUESTS).json({
           error: {
-            message: 'Too Many Requests — Rate limit exceeded. Please try again later.',
+            message: 'Too Many Requests — Rate limit bucket exhausted. Please try again later.',
             statusCode: HTTP_STATUS.TOO_MANY_REQUESTS,
-            limit: maxRequests,
-            retryAfter: `${Math.ceil(windowMs / 1000)}s`,
+            limit: capacity,
+            remaining: result.remaining,
+            retryAfter: `${retryAfterSec}s`,
           },
           timestamp: new Date().toISOString(),
         });
       }
 
-      active.push(now);
-      this.inMemoryStore.set(clientIp, active);
       next();
     };
   }

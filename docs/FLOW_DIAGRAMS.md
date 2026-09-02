@@ -36,7 +36,7 @@ Client       Gateway Edge      WAF Scan       Load Balancer      Backend
   |               |<-- Clean ------|                |               |
   |               |                                 |               |
   |               |--- Query Target Selection ----->|               |
-  |               |    (RR / WRR / Connections)     |               |
+  |               |    (Consistent Hash / RR / LC)  |               |
   |               |<-- Return backend-2 IP ---------|               |
   |               |                                                 |
   |               |--- Stream headers & payload (X-Forwarded-*) --->|
@@ -66,4 +66,53 @@ Client         Gateway Edge      WAF Scan       Logger      Backend
   |                 |    (Threat details stored)  |            |
   |<-- 403 ---------|                                          |
   |    Forbidden    |                                          |
+```
+
+---
+
+## 4. Consistent Hashing Ring Selection Flow
+
+When `algorithm=consistent-hash`, client IP/session key is hashed onto a 32-bit MD5 ring. Binary search locates the nearest clockwise virtual node, ensuring $O(\log V)$ lookup speed:
+
+```
+Client Key: "192.168.1.50"
+  |
+  +---> MD5 Hash ("192.168.1.50") = 0x8A4F102B (2,320,432,171)
+            |
+            v
+   [ 32-Bit Hash Ring: 0 ---------------------------------------- 2^32-1 ]
+                                    ^ (0x8A4F102B)
+                                    |
+                 +------------------+------------------+
+                 | Clockwise Search (Binary Search)     |
+                 v                                     v
+            vnode: backend-2#v12                 vnode: backend-1#v05
+            (0x8B1002A1)                         (0x91F00112)
+                 |
+                 v
+       Selected Target: Backend-2 (Healthy)
+```
+
+---
+
+## 5. Idempotent Retry & Exponential Backoff Flow
+
+When an upstream backend connection drops (`ECONNREFUSED` / timeout), idempotent requests (`GET`/`HEAD`) automatically retry across alternative healthy backends:
+
+```
+Client           Proxy Edge              Backend-1 (Down)      Backend-2 (Up)
+  |                  |                          |                    |
+  |--- GET /data --->|                          |                    |
+  |                  |--- (1st Attempt) ------->|                    |
+  |                  |<-- ECONNREFUSED ---------|                    |
+  |                  |   (recordFailure, add backend-1 to failed set)
+  |                  |
+  |                  |=== [Is Idempotent? YES] ===
+  |                  |=== [Attempts = 1 <= 2? YES] ===
+  |                  |=== [Backoff Jitter Delay: 45ms] ===
+  |                  |
+  |                  |--- (2nd Attempt) ---------------------------->|
+  |                  |<-- 200 OK (Stream Bytes) ---------------------|
+  |                  |
+  |<-- 200 OK -------|
 ```

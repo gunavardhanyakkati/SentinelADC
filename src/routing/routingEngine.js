@@ -50,7 +50,15 @@ class RoutingEngine {
    * @returns {import('../config/backends.js').Backend | null}
    */
   selectBackend(req) {
-    const healthy = this.getHealthyBackends();
+    let healthy = this.getHealthyBackends();
+
+    // Filter out backends that already failed during retry attempts for this request
+    if (req && req._failedBackends && req._failedBackends.size > 0) {
+      const candidates = healthy.filter((b) => !req._failedBackends.has(b.id));
+      if (candidates.length > 0) {
+        healthy = candidates;
+      }
+    }
 
     if (healthy.length === 0) {
       log.error('No healthy backends available');

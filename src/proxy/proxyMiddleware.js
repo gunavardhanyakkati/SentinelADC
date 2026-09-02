@@ -65,8 +65,106 @@ const keepAliveAgent = new http.Agent({
  * @param {Object} routingEngine - The routing engine instance
  * @returns {import('express').RequestHandler} Express middleware
  */
+/**
+ * Calculate exponential backoff delay with full jitter.
+ * @param {number} attempt - Current attempt (1, 2)
+ * @param {number} baseMs - Base backoff (default 50ms)
+ * @param {number} maxMs - Max backoff ceiling (default 500ms)
+ * @returns {number} Delay in milliseconds
+ */
+export function calculateBackoffJitter(attempt, baseMs = 50, maxMs = 500) {
+  const cap = Math.min(maxMs, baseMs * Math.pow(2, attempt));
+  return Math.floor(Math.random() * cap);
+}
+
+/**
+ * Handle proxy error with idempotent retry logic.
+ */
+export async function handleProxyError(err, req, res, proxyInstance) {
+  collectProxyError(req, err);
+
+  const failedBackendId = req._backendId;
+  if (failedBackendId) {
+    req._failedBackends = req._failedBackends || new Set();
+    req._failedBackends.add(failedBackendId);
+    circuitBreakerManager.recordFailure(failedBackendId, err.code || err.message);
+  }
+
+  const method = (req.method || 'GET').toUpperCase();
+  const isIdempotent = ['GET', 'HEAD', 'OPTIONS'].includes(method);
+  const MAX_RETRIES = 2; // Allow up to 2 retries (3 total attempts)
+  req._attempts = req._attempts || 1;
+
+  log.error('Proxy error', {
+    error: err.message,
+    code: err.code,
+    backend: failedBackendId,
+    path: req.originalUrl,
+    attempt: req._attempts,
+    isIdempotent,
+  });
+
+  // Idempotent Retry Logic (GET/HEAD/OPTIONS only)
+  if (isIdempotent && req._attempts <= MAX_RETRIES && !res.headersSent) {
+    req._attempts++;
+    const delayMs = calculateBackoffJitter(req._attempts);
+
+    log.warn(`🔄 Retrying idempotent request [${method} ${req.originalUrl}] (Attempt #${req._attempts}/${MAX_RETRIES + 1}). Failed backend: ${failedBackendId}. Backoff delay: ${delayMs}ms`);
+
+    // Reset target backend so router selects a new healthy target
+    delete req._targetBackend;
+    delete req._backendId;
+    delete req._lbAlgorithm;
+
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+
+    if (proxyInstance) {
+      return proxyInstance(req, res, (retryErr) => {
+        if (!res.headersSent) {
+          res.status(502).json({
+            error: {
+              message: 'Bad Gateway — upstream server unavailable',
+              statusCode: 502,
+              backend: failedBackendId,
+            },
+            timestamp: new Date().toISOString(),
+          });
+        }
+      });
+    }
+  }
+
+  // Non-idempotent methods or retries exhausted: send HTTP 502
+  if (!res.headersSent) {
+    const reason = !isIdempotent
+      ? `Non-idempotent request [${method}] failed (retries disabled to prevent double-writes)`
+      : 'Bad Gateway — upstream server unavailable';
+
+    res.status(502).json({
+      error: {
+        message: reason,
+        statusCode: 502,
+        backend: failedBackendId,
+        attempts: req._attempts,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  }
+}
+
+/**
+ * Create the reverse proxy middleware.
+ * The routing engine must be passed in to avoid circular dependencies.
+ *
+ * @param {Object} routingEngine - The routing engine instance
+ * @returns {import('express').RequestHandler} Express middleware
+ */
 export default function createProxyMiddleware_(routingEngine) {
-  const proxyMiddleware = createProxyMiddleware({
+  let proxyInstance;
+
+  proxyInstance = createProxyMiddleware({
     agent: keepAliveAgent,
 
     // Dynamic target: the router function is called for every request
@@ -116,10 +214,6 @@ export default function createProxyMiddleware_(routingEngine) {
 
     // ─── Lifecycle Hooks ──────────────────────────────────────────────────
 
-    /**
-     * Called before the proxy request is sent.
-     * Add proxy headers (X-Forwarded-For, etc.)
-     */
     on: {
       proxyReq: (proxyReq, req, res) => {
         addProxyHeaders(proxyReq, req);
@@ -157,34 +251,9 @@ export default function createProxyMiddleware_(routingEngine) {
 
       /**
        * Called when a proxy error occurs (e.g., backend unreachable).
-       * Return a proper 502 Bad Gateway response.
+       * Retries idempotent requests (GET/HEAD/OPTIONS) on healthy alternate backends.
        */
-      error: (err, req, res) => {
-        collectProxyError(req, err);
-
-        if (req._backendId) {
-          circuitBreakerManager.recordFailure(req._backendId, err.code || err.message);
-        }
-
-        log.error('Proxy error', {
-          error: err.message,
-          code: err.code,
-          backend: req._backendId,
-          path: req.originalUrl,
-        });
-
-        // Only send response if headers haven't been sent yet
-        if (!res.headersSent) {
-          res.status(502).json({
-            error: {
-              message: 'Bad Gateway — upstream server unavailable',
-              statusCode: 502,
-              backend: req._backendId,
-            },
-            timestamp: new Date().toISOString(),
-          });
-        }
-      },
+      error: (err, req, res) => handleProxyError(err, req, res, proxyInstance),
     },
 
     // Don't log to console (we use our own logger)
@@ -195,5 +264,9 @@ export default function createProxyMiddleware_(routingEngine) {
     },
   });
 
-  return proxyMiddleware;
+  return function proxyMiddlewareWithRetry(req, res, next) {
+    req._attempts = req._attempts || 1;
+    req._failedBackends = req._failedBackends || new Set();
+    return proxyInstance(req, res, next);
+  };
 }

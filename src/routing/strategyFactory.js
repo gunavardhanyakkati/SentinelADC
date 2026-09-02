@@ -21,6 +21,7 @@ import RoundRobinStrategy from './strategies/roundRobin.js';
 import LeastConnectionsStrategy from './strategies/leastConnections.js';
 import WeightedRoundRobinStrategy from './strategies/weightedRoundRobin.js';
 import IpHashStrategy from './strategies/ipHash.js';
+import ConsistentHashStrategy from './strategies/consistentHash.js';
 import { LB_ALGORITHMS } from '../utils/constants.js';
 
 class StrategyFactory {
@@ -30,6 +31,7 @@ class StrategyFactory {
       [LB_ALGORITHMS.LEAST_CONNECTIONS]: new LeastConnectionsStrategy(),
       [LB_ALGORITHMS.WEIGHTED_ROUND_ROBIN]: new WeightedRoundRobinStrategy(),
       [LB_ALGORITHMS.IP_HASH]: new IpHashStrategy(),
+      [LB_ALGORITHMS.CONSISTENT_HASH]: new ConsistentHashStrategy(),
     };
   }
 
